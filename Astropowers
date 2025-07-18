@@ -1,0 +1,221 @@
+#!/bin/bash
+
+# Create folder structure
+PROJECT="astropower"
+BACKEND="$PROJECT/backend"
+FRONTEND="$PROJECT/frontend"
+
+echo "📁 Creating folder structure..."
+mkdir -p "$BACKEND" "$FRONTEND"
+
+# Create backend/index.js
+cat > "$BACKEND/index.js" <<'EOF'
+const express = require("express");
+const bodyParser = require("body-parser");
+const cors = require("cors");
+const rateLimit = require("express-rate-limit");
+const mongoose = require("mongoose");
+const kundali = require("astro-kundali");
+require("dotenv").config();
+
+const app = express();
+
+// Middleware
+app.use(cors());
+app.use(bodyParser.json());
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: "Too many requests" }));
+
+// DB setup
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+}).then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => console.error("DB Connection Error:", err));
+
+// Schema
+const Report = mongoose.model("Report", new mongoose.Schema({
+  userId: String,
+  kundliData: Object,
+  created: { type: Date, default: Date.now }
+}));
+
+// Routes
+app.post("/api/kundli", async (req, res) => {
+  const { date, time, lat, lon, userId } = req.body;
+  try {
+    const [year, month, day] = date.split("-").map(Number);
+    const [hour, minute] = time.split(":").map(Number);
+    const data = kundali.getKundali({ year, month, date: day, hour, minute, latitude: +lat, longitude: +lon, timezone: 5.5 });
+    if (userId) await Report.create({ userId, kundliData: data });
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to generate Kundli", details: err.message });
+  }
+});
+
+app.get("/api/reports/:userId", async (req, res) => {
+  const reports = await Report.find({ userId: req.params.userId }).sort({ created: -1 }).limit(10);
+  res.json(reports);
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+EOF
+
+# Create backend/package.json
+cat > "$BACKEND/package.json" <<'EOF'
+{
+  "name": "astropower-backend",
+  "version": "1.0.0",
+  "description": "Astropower Kundli API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "astro-kundali": "^1.1.9",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "express-rate-limit": "^6.7.0",
+    "mongoose": "^8.0.0"
+  }
+}
+EOF
+
+# Create backend/.env
+cat > "$BACKEND/.env" <<'EOF'
+MONGO_URI=mongodb://localhost:27017/astropower
+PORT=5000
+EOF
+
+# Create frontend/index.html
+cat > "$FRONTEND/index.html" <<'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Astropower – Kundli Generator</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <style>
+    body { font-family: Arial; max-width: 700px; margin: auto; padding: 20px; background: #fffbe9; }
+    section { background: white; padding: 18px; margin: 20px 0; border-radius: 10px; box-shadow: 0 0 10px #ddd; }
+    input, button { width: 100%; padding: 8px; margin: 5px 0; }
+    button { background: #ff9900; color: white; border: none; font-weight: bold; }
+    pre { background: #f0f0f0; padding: 10px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+
+<h1>🕉️ Astropower – Kundli Generator</h1>
+
+<section id="auth-section">
+  <input type="email" id="email" placeholder="Email">
+  <input type="password" id="password" placeholder="Password">
+  <button onclick="login()">Login</button>
+  <button onclick="register()">Register</button>
+  <button onclick="logout()">Logout</button>
+  <p id="auth-status"></p>
+</section>
+
+<section id="kundli-section" style="display: none;">
+  <form id="kundli-form">
+    <h2>Kundli Generator</h2>
+    <input type="date" name="dob" required>
+    <input type="time" name="tob" required>
+    <input type="number" name="lat" placeholder="Latitude" required>
+    <input type="number" name="lon" placeholder="Longitude" required>
+    <button type="submit">Generate</button>
+  </form>
+  <button id="pdfBtn" onclick="exportPDF()" style="display:none;">Download as PDF</button>
+  <pre id="kundli-result"></pre>
+</section>
+
+<section>
+  <h2>Your Reports</h2>
+  <pre id="report-list"></pre>
+</section>
+
+<script>
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT"
+  };
+  firebase.initializeApp(firebaseConfig);
+  const auth = firebase.auth();
+
+  auth.onAuthStateChanged(user => {
+    document.getElementById('auth-status').innerText = user ? \`Logged in as \${user.email}\` : 'Logged out';
+    document.getElementById('kundli-section').style.display = user ? 'block' : 'none';
+    if (user) fetchReports(user.uid);
+  });
+
+  function login() {
+    auth.signInWithEmailAndPassword(
+      document.getElementById('email').value,
+      document.getElementById('password').value
+    ).catch(err => alert(err.message));
+  }
+
+  function register() {
+    auth.createUserWithEmailAndPassword(
+      document.getElementById('email').value,
+      document.getElementById('password').value
+    ).catch(err => alert(err.message));
+  }
+
+  function logout() { auth.signOut(); }
+
+  document.getElementById('kundli-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const user = auth.currentUser;
+    const [dob, tob, lat, lon] = [this.dob.value, this.tob.value, this.lat.value, this.lon.value];
+
+    const res = await fetch("http://localhost:5000/api/kundli", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ date: dob, time: tob, lat, lon, userId: user.uid })
+    });
+
+    const data = await res.json();
+    document.getElementById("kundli-result").textContent = JSON.stringify(data, null, 2);
+    document.getElementById("pdfBtn").style.display = 'block';
+    fetchReports(user.uid);
+  });
+
+  function exportPDF() {
+    html2pdf().from(document.getElementById("kundli-result"))
+      .set({ filename: "kundli.pdf" }).save();
+  }
+
+  async function fetchReports(uid) {
+    const res = await fetch(\`http://localhost:5000/api/reports/\${uid}\`);
+    const data = await res.json();
+    document.getElementById("report-list").textContent = data.map(r =>
+      \`🗓️ \${new Date(r.created).toLocaleString()}\n\${JSON.stringify(r.kundliData, null, 2)}\n----\`
+    ).join('\\n\\n');
+  }
+</script>
+
+</body>
+</html>
+EOF
+
+# Create README.md
+cat > "$PROJECT/README.md" <<'EOF'
+# Astropower Astrology Platform
+
+## Features
+- 🔮 Kundli generation via Node.js + astro-kundali
+- 🔐 Firebase Authentication (login/register)
+- 💾 MongoDB + Mongoose to save Kundlis
+- 📄 Export Kundlis as PDF using html2pdf
+- 🌐 Frontend: Pure HTML/JS - ready for Firebase Hosting/Vercel
+
+## Run Backend
